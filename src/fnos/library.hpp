@@ -65,6 +65,8 @@ class Library
     void show(Shelf shelf);
     // Tracks inside a playlist, album, artist or genre.
     void open(Shelf kind, const std::string &guid, const std::string &name);
+    // Re-reads what is on screen: the shelf, or the collection opened inside it.
+    void refresh();
     void search(const std::string &text);
     void sign_in(std::string server, std::string username, std::string password);
     void sign_out();
@@ -248,6 +250,7 @@ class Library
 
     Shelf shelf_ = Shelf::songs;
     std::string collection_;
+    std::string collection_guid_; // what to re-ask for on a refresh
     std::string query_;
     std::string message_;
     bool failed_ = false;

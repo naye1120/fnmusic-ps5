@@ -15,6 +15,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef HUI_PS5
@@ -28,6 +29,14 @@ namespace
 {
 
 constexpr const char *kApi = "/music/api/v1";
+
+// A page of the whole library, and how many of them to ask for. `total` ends
+// the loop on the first page that is already covered; the cap is only a
+// stop-loss for a server that reports an inflated figure and keeps the worker
+// busy forever. Five thousand songs is a library no home NAS holds, and one
+// page of a hundred rows costs about as much as the next.
+constexpr int kTrackPage = 100;
+constexpr int kTrackPages = 50;
 
 std::string number(long long value)
 {
@@ -314,11 +323,39 @@ bool Api::playlist_tracks(const std::string &guid, TrackPage *out, std::string *
 
 bool Api::tracks(int page, TrackPage *out, std::string *error)
 {
+    return tracks_page(page, kTrackPage, out, error);
+}
+
+bool Api::tracks_page(int page, int size, TrackPage *out, std::string *error)
+{
     Json data;
-    if (!ask(base_, auth_headers(), "/track/list?page=" + number(page) + "&size=50", {}, &data,
-             error))
+    if (!ask(base_, auth_headers(),
+             "/track/list?page=" + number(page) + "&size=" + number(size), {}, &data, error))
         return false;
     return fill_page(data, out, track_of);
+}
+
+bool Api::all_tracks(TrackPage *out, std::string *error)
+{
+    out->items.clear();
+    out->total = 0;
+    for (int page = 1; page <= kTrackPages; ++page)
+    {
+        TrackPage slice;
+        if (!tracks_page(page, kTrackPage, &slice, error))
+            return false;
+        for (Track &track : slice.items)
+            out->items.push_back(std::move(track));
+        out->total = slice.total;
+        // A short page is the last one even when the server would not say how
+        // many there are: `total` is 0 on some builds and fill_page backfills it
+        // with the page's own size.
+        if (static_cast<int>(slice.items.size()) < kTrackPage)
+            break;
+        if (static_cast<long>(out->items.size()) >= out->total)
+            break;
+    }
+    return true;
 }
 
 bool Api::albums(int page, AlbumPage *out, std::string *error)

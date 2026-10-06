@@ -105,6 +105,9 @@ class Api
     bool playlists(int page, PlaylistPage *out, std::string *error);
     bool playlist_tracks(const std::string &guid, TrackPage *out, std::string *error);
     bool tracks(int page, TrackPage *out, std::string *error);
+    // The whole library, a page at a time: one page is a hundred songs and a
+    // real library is several hundred, so `total` decides how many to ask for.
+    bool all_tracks(TrackPage *out, std::string *error);
     bool albums(int page, AlbumPage *out, std::string *error);
     bool album_tracks(const std::string &guid, TrackPage *out, std::string *error);
     bool artists(ArtistPage *out, std::string *error);
@@ -128,6 +131,8 @@ class Api
 
   private:
     std::vector<std::string> auth_headers() const;
+    // One page of /track/list at a chosen size; `tracks` and `all_tracks` wrap it.
+    bool tracks_page(int page, int size, TrackPage *out, std::string *error);
 
     std::string base_;
     std::string token_;

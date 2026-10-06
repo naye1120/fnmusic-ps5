@@ -312,7 +312,7 @@ Library::Answer Library::ask(const Job &job)
     case kSongs:
     {
         TrackPage page;
-        ok = api_.tracks(1, &page, &error);
+        ok = api_.all_tracks(&page, &error);
         answer.tracks = std::move(page);
         break;
     }
@@ -574,6 +574,7 @@ void Library::show(Shelf shelf)
 {
     shelf_ = shelf;
     collection_.clear();
+    collection_guid_.clear();
     drop_shelf_jobs();
     failed_ = false;
     Job job;
@@ -618,6 +619,7 @@ void Library::open(Shelf kind, const std::string &guid, const std::string &name)
 {
     shelf_ = kind;
     collection_ = name;
+    collection_guid_ = guid;
     drop_shelf_jobs();
     failed_ = false;
     Job job;
@@ -647,6 +649,14 @@ void Library::search(const std::string &text)
 {
     query_ = text;
     show(Shelf::search);
+}
+
+void Library::refresh()
+{
+    if (collection_.empty())
+        show(shelf_);
+    else
+        open(shelf_, collection_guid_, collection_);
 }
 
 void Library::sign_in(std::string server, std::string username, std::string password)

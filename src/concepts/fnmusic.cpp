@@ -532,8 +532,10 @@ class Fnmusic final : public app::Concept
                 step_rail(1, lib, feedback);
                 return;
             }
-            if (input.is_pressed(Action::menu) && lib.shelf() != Shelf::setup &&
-                (track_shelf(lib.shelf()) || !show_cards(lib)))
+            // Options on the chips row means "read this shelf again"; anywhere
+            // else it is the favourite switch of the row or track in hand.
+            if (input.is_pressed(Action::menu) && zone_ != Zone::chips &&
+                lib.shelf() != Shelf::setup && (track_shelf(lib.shelf()) || !show_cards(lib)))
             {
                 toggle_favorite(lib, focused_track(lib), feedback);
                 return;
@@ -842,19 +844,92 @@ class Fnmusic final : public app::Concept
         }
 
         cover_gl_.assign(cover_ids_.size(), 0u);
-        for (std::size_t i = 0; i < cover_ids_.size(); ++i)
+        // Only what the window can show. The cache holds forty textures, so
+        // asking for a whole shelf of songs means the upload drops a cover the
+        // page is still drawing, the next frame wants it back, and the fetch
+        // and the GL upload never stop: that is the flicker, and the load that
+        // took the console down mid-playback.
+        for (int i = 0; i < static_cast<int>(cover_ids_.size()); ++i)
         {
-            const std::string &key = cover_ids_[i];
-            if (key.empty())
+            const std::string &key = cover_ids_[static_cast<std::size_t>(i)];
+            if (key.empty() || !cover_visible(lib, i))
                 continue;
-            cover_gl_[i] = fn_.art().texture(key);
+            cover_gl_[static_cast<std::size_t>(i)] = fn_.art().texture(key);
             lib.request_cover(key);
+        }
+        // The banner keeps showing the playing track wherever the focus is.
+        if (const fnos::Track *playing = fn_.current();
+            playing != nullptr && !playing->cover_id.empty())
+        {
+            fn_.art().texture(playing->cover_id);
+            lib.request_cover(playing->cover_id);
         }
         if (cover_gl_ != painted_)
         {
-            painted_ = cover_gl_;
-            rebuild_ = true;
+            // A cover landing changes the cards that hold it, not the page. A
+            // full rebuild fits every title on the shelf again, so on a library
+            // of several hundred songs scrolling one row at a time would pay a
+            // whole page's work per frame.
+            if (painted_.size() == cover_gl_.size() &&
+                (!show_cards(lib) || grid_.size() == cover_ids_.size()))
+                paint_covers();
+            else
+            {
+                painted_ = cover_gl_;
+                rebuild_ = true;
+            }
         }
+    }
+
+    // Paint the covers that arrived — or were dropped from the forty-slot cache,
+    // which hands back 0 and must clear the card too, since a deleted GL id can
+    // never be drawn again — without touching the cards that did not change.
+    void paint_covers()
+    {
+        for (std::size_t i = 0; i < cover_gl_.size(); ++i)
+        {
+            const std::uint32_t gl = cover_gl_[i];
+            if (gl == painted_[i])
+                continue;
+            painted_[i] = gl;
+            const std::string &key = cover_ids_[i];
+            if (i < grid_.size())
+            {
+                ui::CardItem &card = grid_[i];
+                card.texture = gl;
+                card.uv = gfx::kFullUv;
+                int width = 0;
+                int height = 0;
+                if (gl != 0 && fn_.art().size(key, &width, &height))
+                    card.uv = banner_uv(width, height);
+            }
+            if (!banner_key_.empty() && key == banner_key_ && gl != banner_gl_)
+            {
+                banner_gl_ = gl;
+                banner_uv_ = gfx::kFullUv;
+                int width = 0;
+                int height = 0;
+                if (gl != 0 && fn_.art().size(key, &width, &height))
+                    banner_uv_ = square_uv(width, height);
+            }
+        }
+    }
+
+    // True when item k is inside the visible part of the grid or the row list.
+    bool cover_visible(const Library &lib, int k) const
+    {
+        if (!show_cards(lib))
+        {
+            // The shelf can gain a page before the list is rebuilt, and
+            // row_rect has no answer for a row that is not there yet.
+            if (k >= static_cast<int>(tracks_.items().size()))
+                return false;
+            const Rect row = tracks_.row_rect(k);
+            const Rect box = tracks_.bounds();
+            return row.y + row.h > box.y && row.y < box.y + box.h;
+        }
+        const float top = card_rect(k).y - grid_scroll_.value;
+        return top + kCardH > window_top() && top < kViewBottom;
     }
 
     void rebuild(const Library &lib)
@@ -1011,6 +1086,7 @@ class Fnmusic final : public app::Concept
     {
         banner_gl_ = 0;
         banner_uv_ = gfx::kFullUv;
+        banner_key_.clear();
         banner_unit_.clear();
         banner_song_ = false;
         banner_kicker_ = shelf_title(lib.shelf());
@@ -1053,6 +1129,7 @@ class Fnmusic final : public app::Concept
             banner_stat_ = length > 0 ? clock_text(length) : std::string("--:--");
             banner_tone_ = gfx::mix(plate_color(song->guid + song->title), kCoal, 0.55f);
             banner_gl_ = song->cover_id.empty() ? 0u : fn_.art().texture(song->cover_id);
+            banner_key_ = song->cover_id;
             int width = 0;
             int height = 0;
             if (banner_gl_ != 0 && fn_.art().size(song->cover_id, &width, &height))
@@ -1137,6 +1214,7 @@ class Fnmusic final : public app::Concept
         {
             banner_gl_ = cover_gl_[0];
             const std::string &key = cover_ids_.empty() ? empty_key_ : cover_ids_[0];
+            banner_key_ = key;
             int width = 0;
             int height = 0;
             if (banner_gl_ != 0 && fn_.art().size(key, &width, &height))
@@ -2233,6 +2311,7 @@ class Fnmusic final : public app::Concept
         else if (zone_ == Zone::chips)
         {
             hints.push_back({ui::Button::cross, "打开这一栏"});
+            hints.push_back({ui::Button::options, "刷新这一栏"});
             hints.push_back({ui::Button::dpad, "左右选分类，下键进内容"});
         }
         else if (lib.shelf() == Shelf::setup)
@@ -2289,6 +2368,19 @@ class Fnmusic final : public app::Concept
         if (input.nav == Direction::down || input.is_pressed(Action::confirm))
         {
             open_chip(lib, feedback);
+            return;
+        }
+        if (input.is_pressed(Action::menu))
+        {
+            // The NAS has gained songs since this console last looked.
+            if (lib.shelf() == Shelf::setup)
+                feedback.play(audio::Cue::error);
+            else
+            {
+                lib.refresh();
+                feedback.play(audio::Cue::open);
+                rebuild_ = true;
+            }
             return;
         }
         if (input.nav == Direction::up)
@@ -2960,6 +3052,7 @@ class Fnmusic final : public app::Concept
     std::array<float, kBars> peaks_{};
     std::uint32_t banner_gl_ = 0;
     Rect banner_uv_ = gfx::kFullUv;
+    std::string banner_key_; // the cover the plate shows, so a late one still lands on it
     Color banner_tone_ = kAccent;
     std::string banner_kicker_;
     std::string banner_title_;
