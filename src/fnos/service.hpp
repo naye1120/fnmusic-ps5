@@ -115,6 +115,9 @@ class Service
   private:
     Service() = default;
     void play_at(int index);
+    // Asks the library worker for the next song's address while this one is
+    // still playing out.
+    void arm_prefetch();
 
     Library library_;
     std::string crash_trace_;
@@ -123,6 +126,9 @@ class Service
     Player player_;
     std::vector<Track> queue_;
     int index_ = -1;
+    // The queue index whose address the worker has already been asked for, so
+    // one song buys one fetch and not one per frame.
+    int prefetched_ = -1;
     bool shuffle_ = false;
     Repeat repeat_ = Repeat::off;
     float volume_ = 1.0f;

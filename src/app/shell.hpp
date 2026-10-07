@@ -62,6 +62,8 @@ class Shell
     {
         return telemetry_;
     }
+    // The app's own version, read from the packaged param.json. Designs see it
+    // through Context::version, which is a reference to this same string.
     void set_version(std::string version)
     {
         version_ = std::move(version);
@@ -103,6 +105,9 @@ class Shell
     std::string data_root_;
     Settings settings_;
     Telemetry telemetry_;
+    // Declared before context_ on purpose: the designs hold a reference to it,
+    // and it is filled in by set_version() once the app has read param.json.
+    std::string version_;
     Context context_;
     std::vector<std::unique_ptr<Concept>> concepts_;
     std::size_t current_ = 0;
@@ -113,7 +118,6 @@ class Shell
     gfx::DrawList chrome_;
     Feedback feedback_;
     std::uint32_t glass_texture_ = 0;
-    std::string version_;
     float banner_ = 0.0f; // seconds the switcher banner stays up
     tween::Spring banner_show_;
     bool info_open_ = false;

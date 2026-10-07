@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace hui::app
@@ -62,6 +63,11 @@ struct Context
     // Live settings. A design that edits them sets settings_changed; the app
     // applies the change (volumes, button swap, ...) and saves it.
     Settings &settings;
+    // The app's version as the packaged param.json states it: the one number
+    // the running program, the build and the release all agree on. It is empty
+    // until the app has read the file, so read it when drawing, not once at
+    // construction.
+    const std::string &version;
     bool settings_changed = false;
 };
 

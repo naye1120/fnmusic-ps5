@@ -110,6 +110,11 @@ std::vector<std::string> previous_run_lines(const std::string &data_root)
     return lines;
 }
 
+// The seconds left of this song when the next one's address is asked for. The
+// worker is behind a shelf and a row of covers by then, and its answer is a
+// single 0-0 range read, so a lead this short is enough and no frame waits.
+constexpr int kPrefetchLead = 20;
+
 } // namespace
 
 Service &Service::instance()
@@ -141,6 +146,7 @@ void Service::update(gfx::Renderer &renderer)
 {
     art_.upload(renderer);
     library_.poll();
+    arm_prefetch();
     // The track is over when the stream says so, or when the seconds the NAS
     // counted for it have gone by inside a file that is far longer than the
     // song: an album image never reaches its own end at the end of a track.
@@ -174,6 +180,7 @@ void Service::play_at(int index)
         return;
     last_shuffle_ = index_;
     index_ = index;
+    prefetched_ = -1; // a fresh song has not had its neighbour asked for
     const Track &track = queue_[static_cast<std::size_t>(index)];
     // The markers around a song choice are what tells a hardware crash apart
     // from a hung stream: the last line that lands is the step that died.
@@ -188,6 +195,26 @@ void Service::play_at(int index)
     if (!track.cover_id.empty())
         library_.request_cover(track.cover_id);
     sys::log("[HUI] play asked for lyric and cover");
+}
+
+void Service::arm_prefetch()
+{
+    // The switch to the next song starts with a redirect round trip before the
+    // first byte of audio, so the worker settles that address while the tail of
+    // this one is still sounding. Two queue modes are left out because the
+    // fetch would be a guess: shuffle chooses at the moment of the switch, and
+    // repeat-one returns to a song whose address this call spends on its way
+    // out. The last track of a queue that does not loop has no next at all.
+    if (shuffle_ || repeat_ == Repeat::one || index_ < 0)
+        return;
+    const int upcoming = index_ + 1;
+    if (upcoming >= static_cast<int>(queue_.size()) || prefetched_ == upcoming)
+        return;
+    const int length = player_.duration();
+    if (length <= 0 || player_.position() + kPrefetchLead < length)
+        return;
+    prefetched_ = upcoming;
+    library_.request_prefetch(queue_[static_cast<std::size_t>(upcoming)].guid);
 }
 
 const Track *Service::current() const

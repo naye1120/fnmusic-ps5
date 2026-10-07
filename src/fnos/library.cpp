@@ -7,6 +7,7 @@
 
 #include "core/save_file.hpp"
 #include "fnos/art.hpp"
+#include "fnos/http.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -32,6 +33,23 @@ constexpr int kIdleMilliseconds = 40;
 // Answers the render thread has not come back for. Dropping the oldest keeps a
 // hitch from building a queue that never drains.
 constexpr std::size_t kMaxAnswers = 8;
+// How long a prefetched address stays worth spending. The switch it was asked
+// for lands seconds after the ask; anything older means the player went another
+// way, and an address the NAS signed a while ago is a guess rather than a fact.
+constexpr int kPrefetchSeconds = 60;
+// The redirect walk is a 0-0 range request on the wire behind the song that is
+// playing, so it gets a small budget: a target that slow is not worth the gap.
+constexpr int kPrefetchTimeout = 5;
+// Frames a queued cover request survives without being asked for again. The
+// screen re-asks for every tile inside the window on every frame, so a request
+// that has gone quiet names a cover that scrolled out of it: fetching those is
+// bytes spent on a picture nobody is looking at, on the thread the shelf that
+// person is reading waits behind.
+constexpr std::uint64_t kCoverGrace = 20;
+// How many covers may wait at once. A window is a couple of dozen tiles, so this
+// is a stop-loss for a fast scroll against a slow server rather than a number a
+// player reaches; a refused request is simply asked again next frame.
+constexpr std::size_t kMaxCoverJobs = 64;
 
 constexpr const char *kShelfTitle[] = {
     "歌曲", "歌单", "专辑", "艺人", "风格", "收藏", "搜索", "设置",
@@ -246,6 +264,7 @@ void Library::work()
     for (;;)
     {
         Job job;
+        bool abandoned = false;
         {
             std::lock_guard<std::mutex> lock(guard_);
             if (stop_)
@@ -254,9 +273,14 @@ void Library::work()
             {
                 job = std::move(queue_.front());
                 queue_.pop_front();
-                working_ = true;
+                if (job.request == kCover && cover_clock_ - job.stamp >= kCoverGrace)
+                    abandoned = true; // the tile left the window: fetch nothing
+                else
+                    working_ = true;
             }
         }
+        if (abandoned)
+            continue; // the next job, if any, is not any the poorer for the sleep
         if (job.request == kNone)
         {
             idle();
@@ -268,9 +292,28 @@ void Library::work()
         if (stop_)
             return;
         if (answers_.size() >= kMaxAnswers)
-            answers_.pop_front();
+            drop_reaskable();
         answers_.push_back(std::move(answer));
     }
+}
+
+// The ring is full and something has to go. The two kinds are not equal: a
+// cover the screen did not get is asked again on the next frame, while a shelf
+// whose answer was dropped leaves the page empty until someone turns it over —
+// which is what a burst of artwork does to a shelf read. So artwork gives up
+// its place first, and a shelf only if the ring holds nothing else.
+// Called with guard_ held, from the worker only.
+void Library::drop_reaskable()
+{
+    for (auto answer = answers_.begin(); answer != answers_.end(); ++answer)
+    {
+        if (answer->request == kCover || answer->request == kPrefetch)
+        {
+            answers_.erase(answer);
+            return;
+        }
+    }
+    answers_.pop_front();
 }
 
 Library::Answer Library::ask(const Job &job)
@@ -396,6 +439,20 @@ Library::Answer Library::ask(const Job &job)
         }
         break;
     }
+    case kPrefetch:
+    {
+        // The cheapest thing on this wire: one byte of the next song, asked now
+        // so that its address is settled before the player reaches it. A
+        // refusal is not news about playback - the stream still pays its own
+        // redirect, exactly as it did before this job existed.
+        const std::string resolved = http_resolve_redirects(api_.stream_url(job.guid),
+                                                            api_.media_headers(), kPrefetchTimeout);
+        std::lock_guard<std::mutex> lock(guard_);
+        prefetch_guid_ = job.guid;
+        prefetch_url_ = resolved;
+        prefetch_at_ = std::chrono::steady_clock::now();
+        break;
+    }
     default:
         ok = false;
         break;
@@ -408,11 +465,28 @@ Library::Answer Library::ask(const Job &job)
         answer.server = api_.server();
         answer.token = api_.token();
     }
+    // A session the API layer renewed keeps its new token there, but the
+    // shelves, the stream and the artwork all read it from here: bring it home
+    // or the next job sends the old cookie out again and renews it once more.
+    if (api_.token() != token)
+    {
+        {
+            std::lock_guard<std::mutex> lock(guard_);
+            token_ = api_.token();
+        }
+        persist();
+    }
     return answer;
 }
 
 void Library::poll()
 {
+    {
+        // The frame's tick of the cover clock, taken whether or not anything
+        // finished: a request goes stale by the clock, not by the answers.
+        std::lock_guard<std::mutex> lock(guard_);
+        ++cover_clock_;
+    }
     for (;;)
     {
         Answer answer;
@@ -438,6 +512,10 @@ void Library::apply(Answer &&answer)
             art_->stage(answer.guid, std::move(answer.cover), answer.cover_width,
                         answer.cover_height);
         }
+        return;
+    case kPrefetch:
+        // The worker already parked the address where stream_url() looks; the
+        // banner has nothing to say about a bookkeeping request either way.
         return;
     case kLogin:
     case kCheck:
@@ -716,17 +794,64 @@ void Library::request_cover(const std::string &cover_id)
 {
     if (cover_id.empty() || art_ == nullptr || !art_->wants(cover_id))
         return;
-    if (queued(kCover, cover_id))
+    std::lock_guard<std::mutex> lock(guard_);
+    std::size_t waiting = 0;
+    for (Job &job : queue_)
+    {
+        if (job.request != kCover)
+            continue;
+        ++waiting;
+        if (job.guid != cover_id)
+            continue;
+        // The screen still draws this tile, so the request it already has is
+        // re-stamped rather than duplicated. A cover nobody re-asks for is
+        // dropped when the worker reaches it: this is the only place a
+        // scrolled-away picture is cancelled.
+        job.stamp = cover_clock_;
         return;
+    }
+    if (waiting >= kMaxCoverJobs)
+        return; // asked again next frame, and by then something has gone stale
     Job job;
     job.request = kCover;
     job.guid = cover_id;
-    push(job, false); // artwork waits behind the shelf the player is on
+    job.stamp = cover_clock_;
+    queue_.push_back(job); // artwork waits behind the shelf the player is on
+}
+
+void Library::request_prefetch(const std::string &guid)
+{
+    if (guid.empty())
+        return;
+    {
+        std::lock_guard<std::mutex> lock(guard_);
+        if (guid == prefetch_guid_)
+            return;
+    }
+    if (queued(kPrefetch, guid))
+        return;
+    Job job;
+    job.request = kPrefetch;
+    job.guid = guid;
+    // Last, behind the shelf and the artwork: this is a favour for a song that
+    // has not been asked for yet, and it must never delay one that has.
+    push(job, false);
 }
 
 std::string Library::stream_url(const std::string &guid) const
 {
     std::lock_guard<std::mutex> lock(guard_);
+    if (guid == prefetch_guid_)
+    {
+        // Spent on the way out: the next play of this track, minutes from now
+        // or after a lap of repeat-one, deserves a fresh address.
+        const bool fresh = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - prefetch_at_)
+                               .count() < kPrefetchSeconds;
+        prefetch_guid_.clear();
+        if (fresh)
+            return prefetch_url_;
+    }
     Api scratch;
     scratch.set_server(base_);
     scratch.set_token(token_);

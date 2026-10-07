@@ -160,6 +160,12 @@ format:
 	@printf '%s\n' '==> [format] Formatting C and C++ sources'
 	@bash tools/run_clang_format.sh
 
+# The one place the app's version is read from, so a release tag can be asked
+# for without opening param.json by hand.
+.PHONY: version
+version:
+	@python3 -c 'import json; print(json.load(open("sce_sys/param.json"))["contentVersion"])'
+
 format-check:
 	@printf '%s\n' '==> [format] Checking C and C++ formatting'
 	@bash tools/run_clang_format.sh --check
@@ -210,6 +216,7 @@ help:
 	  'make libc            Force a deterministic runtime/libc.prx rebuild' \
 	  'make format          Apply the shared Clang formatting policy' \
 	  'make format-check    Check formatting without modifying files' \
+	  'make version         Print the app version param.json carries (the release tag)' \
 	  'make tidy            Run the shared Clang static-analysis policy' \
 	  'make lint            Run format, tidy, metadata, and shell checks' \
 	  'make check           Run lint and build the skeleton app' \

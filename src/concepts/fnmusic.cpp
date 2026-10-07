@@ -304,7 +304,7 @@ const char *const kTechniques[] = {
 class Fnmusic final : public app::Concept
 {
   public:
-    explicit Fnmusic(app::Context &context) : fn_(Service::instance())
+    explicit Fnmusic(app::Context &context) : fn_(Service::instance()), version_(context.version)
     {
         build_theme();
         glyphs_ = context.fonts;
@@ -975,9 +975,11 @@ class Fnmusic final : public app::Concept
                                       Field::device, false));
             // The screen this app is built on gets named where the account is
             // named: the kit is GPL-3.0-or-later, so the notice belongs in the
-            // running program and not only in its repository.
+            // running program and not only in its repository. The number is the
+            // one param.json carries, which is also what the build is named for.
             items.push_back(field_row("关于", "github.com/blackbearreloaded · GPL-3.0-or-later",
-                                      "ps5-homebrew-ui", Field::about, false));
+                                      version_.empty() ? std::string("版本未知") : version_,
+                                      Field::about, false));
             fields_.set_items(std::move(items));
             return;
         }
@@ -2026,6 +2028,8 @@ class Fnmusic final : public app::Concept
                  panel.y + 176.0f, 22.0f, kInk.with_alpha(0.9f));
         ui::text(list, glyphs_.regular, "QQ群：310630593", panel.x + 32.0f, panel.y + 214.0f,
                  20.0f, kInk.with_alpha(0.6f));
+        ui::text(list, glyphs_.mono, version_.empty() ? "版本 未知" : "版本 " + version_,
+                 panel.x + 32.0f, panel.y + 252.0f, 20.0f, kInk.with_alpha(0.6f));
         ui::text(list, glyphs_.regular, "界面框架 ps5-homebrew-ui", panel.x + 32.0f,
                  panel.y + panel.h - 48.0f, 19.0f, kInk.with_alpha(0.45f));
         ui::text(list, glyphs_.regular, "作者 BlackBearReloaded · GPL-3.0", panel.x + 32.0f,
@@ -2957,23 +2961,41 @@ class Fnmusic final : public app::Concept
         }
     }
 
-    static constexpr std::array<app::TourStep, 8> kTour = {
-        app::TourStep{1.0f, 0u, Direction::none, "fnmusic-boot", 0.0f, 0.0f, 0u, 0.0f, 0.0f},
-        app::TourStep{0.4f, action_bit(Action::confirm), Direction::none, "fnmusic-home", 0.0f,
+    // The pictures are taken while the app is signed in: the snapshot host
+    // answers the API out of a demo library (src/fnos/http.cpp) before the
+    // first frame, so every shelf has rows to lay out.
+    //
+    // A step's picture shows the page its predecessor's press led to, so the
+    // press that opens a state belongs to the step above the one named for it.
+    // Each press is one frame: L2/R2 wrap around the eight chips, so a step
+    // backwards from 歌曲 lands on 设置.
+    //
+    // The waits are long enough for the page's own entrance to finish: a capsule
+    // fades in over the last second of the stagger, and a picture taken before
+    // it shows two cards of eight.
+    static constexpr std::array<app::TourStep, 10> kTour = {
+        app::TourStep{0.4f, 0u, Direction::none, "fnmusic-boot", 0.0f, 0.0f, 0u, 0.0f, 0.0f},
+        app::TourStep{1.8f, action_bit(Action::confirm), Direction::none, "fnmusic-home", 0.0f,
                       0.0f, 0u, 0.0f, 0.0f},
-        app::TourStep{0.5f, 0u, Direction::right, nullptr, 0.0f, 0.0f, 0u, 0.0f, 0.0f},
-        app::TourStep{0.4f, action_bit(Action::confirm), Direction::none, "fnmusic-grid", 0.0f,
+        app::TourStep{1.0f, action_bit(Action::jump_next), Direction::none, "fnmusic-grid", 0.0f,
                       0.0f, 0u, 0.0f, 0.0f},
-        app::TourStep{0.5f, 0u, Direction::down, "fnmusic-list", 0.0f, 0.0f, 0u, 0.0f, 0.0f},
-        app::TourStep{0.4f, action_bit(Action::jump_prev), Direction::none, "fnmusic-rail", 0.0f,
+        app::TourStep{0.8f, action_bit(Action::confirm), Direction::none, nullptr, 0.0f, 0.0f, 0u,
+                      0.0f, 0.0f},
+        app::TourStep{0.9f, 0u, Direction::down, "fnmusic-list", 0.0f, 0.0f, 0u, 0.0f, 0.0f},
+        app::TourStep{0.5f, action_bit(Action::confirm), Direction::none, nullptr, 0.0f, 0.0f, 0u,
+                      0.0f, 0.0f},
+        app::TourStep{0.7f, 0u, Direction::left, nullptr, 0.0f, 0.0f, 0u, 0.0f, 0.0f},
+        app::TourStep{0.7f, action_bit(Action::west), Direction::none, "fnmusic-rail", 0.0f, 0.0f,
+                      0u, 0.0f, 0.0f},
+        app::TourStep{0.9f, action_bit(Action::north), Direction::none, "fnmusic-playing", 0.0f,
                       0.0f, 0u, 0.0f, 0.0f},
-        app::TourStep{0.4f, action_bit(Action::west), Direction::none, "fnmusic-playing", 0.0f,
-                      0.0f, 0u, 0.0f, 0.0f},
-        app::TourStep{0.4f, action_bit(Action::north), Direction::none, "fnmusic-lyric", 0.0f,
-                      0.0f, 0u, 0.0f, 0.0f},
+        app::TourStep{1.0f, 0u, Direction::none, "fnmusic-lyric", 0.0f, 0.0f, 0u, 0.0f, 0.0f},
     };
 
     Service &fn_;
+    // param.json's contentVersion, through the shell: the same number the build
+    // and the release are named with.
+    const std::string &version_;
     ui::Theme theme_;
     ui::Fonts glyphs_;
     ui::ListView tracks_;

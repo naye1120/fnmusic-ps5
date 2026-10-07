@@ -6,6 +6,7 @@
 
 #include "app/concept.hpp"
 #include "core/save_file.hpp"
+#include "core/version.hpp"
 #include "demo/catalog.hpp"
 #include "gfx/font.hpp"
 #include "ui/fonts.hpp"
@@ -14,6 +15,10 @@
 
 #include <cmath>
 #include <string>
+
+#ifndef HUI_SOURCE_DIR
+#define HUI_SOURCE_DIR "."
+#endif
 
 namespace hui::testing
 {
@@ -24,7 +29,7 @@ namespace hui::testing
 class ConceptFixture : public ::testing::Test
 {
   protected:
-    ConceptFixture() : context_{fonts_, catalog_, telemetry_, settings_}
+    ConceptFixture() : context_{fonts_, catalog_, telemetry_, settings_, version_}
     {
         load("inter-regular", &regular_, &fonts_.regular);
         load("inter-semibold", &semibold_, &fonts_.semibold);
@@ -104,6 +109,10 @@ class ConceptFixture : public ::testing::Test
     demo::Catalog catalog_;
     app::Telemetry telemetry_;
     Settings settings_;
+    // The version the running app would show: read from the same param.json,
+    // so a design's about page is exercised with the real number.
+    std::string version_ =
+        read_content_version(std::string(HUI_SOURCE_DIR) + "/sce_sys/param.json");
     app::Context context_;
     app::Feedback feedback_;
     std::vector<audio::CueEvent> last_cues_;

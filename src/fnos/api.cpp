@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h> // usleep: the recovery waits on the worker, never on the picture
+
 #ifdef HUI_PS5
 #include <openssl/evp.h>
 #endif
@@ -185,15 +187,6 @@ bool fill_page(const Json &data, PageType *out, Parse parse)
     return true;
 }
 
-bool ask(const std::string &base, const std::vector<std::string> &headers, const std::string &path,
-         const std::string &body_json, Json *data, std::string *error)
-{
-    const char *method = body_json.empty() ? "GET" : "POST";
-    const HttpResult result =
-        http_request(method, base + kApi + path, headers, body_json, 8u << 20, 20);
-    return read_reply(result, data, error);
-}
-
 std::string sha256_hex(const std::string &text)
 {
 #ifdef HUI_PS5
@@ -274,14 +267,17 @@ std::string Api::cover_url(const std::string &cover_id, int size) const
            "&size=" + number(size);
 }
 
-bool Api::login(const std::string &username, const std::string &password,
-                const std::string &device_id, std::string *error)
+// The one POST that hands out a token. `password_hash` is sha256 hex already,
+// because a re-login must not need the typed password a second time.
+bool Api::sign_in_with(const std::string &base, const std::string &username,
+                       const std::string &password_hash, const std::string &device_id,
+                       std::string *error)
 {
     const std::string body = "{\"username\":" + json_string_field(username) +
-                             ",\"password\":" + json_string_field(sha256_hex(password)) +
+                             ",\"password\":" + json_string_field(password_hash) +
                              ",\"deviceId\":" + json_string_field(device_id) + "}";
-    const HttpResult result = http_request("POST", base_ + kApi + "/user/password-login",
-                                           auth_headers(), body, 1u << 20, 15);
+    const HttpResult result =
+        http_request("POST", base + kApi + "/user/password-login", {}, body, 1u << 20, 15);
     // A login answer arrives as a redirect when the server forces HTTPS; naming
     // that case beats reporting a plain login failure, as the web client does.
     if (result.status >= 300 && result.status < 400)
@@ -300,6 +296,73 @@ bool Api::login(const std::string &username, const std::string &password,
     }
     token_ = token;
     return true;
+}
+
+bool Api::login(const std::string &username, const std::string &password,
+                const std::string &device_id, std::string *error)
+{
+    const std::string hash = sha256_hex(password);
+    if (!sign_in_with(base_, username, hash, device_id, error))
+        return false;
+    login_user_ = username;
+    login_hash_ = hash;
+    login_device_ = device_id;
+    return true;
+}
+
+// Every endpoint runs through here. Two things go wrong on a home network
+// that are worth the player's silence: a transfer that never landed, and a
+// session the NAS dropped while the console was playing - the second used to
+// mean a red line of text and a keyboard, although the credentials are kept
+// anyway. Both recoveries sleep on this worker thread, so no frame waits.
+bool Api::ask(const std::string &base, const std::vector<std::string> &headers,
+              const std::string &path, const std::string &body_json, Json *data,
+              std::string *error)
+{
+    const char *method = body_json.empty() ? "GET" : "POST";
+    std::vector<std::string> outgo = headers;
+    bool renewed = false;
+    // Renewing means "the session I sent was refused", not "I have credentials
+    // somewhere": after a sign-out the kept user and hash stay in this object,
+    // and a request that carried no cookie must not sign anybody back in.
+    const bool had_session = !token_.empty();
+    // Two transports at most, and a refused session costs one renewal plus the
+    // read it was standing in for. Every way out of here names the failure.
+    int transports = 0;
+    for (;;)
+    {
+        const HttpResult result =
+            http_request(method, base + kApi + path, outgo, body_json, 8u << 20, 20);
+        if (!result.error.empty())
+        {
+            ++transports;
+            if (transports < 2)
+            {
+                ::usleep(300 * 1000);
+                continue;
+            }
+            *error = "网络请求失败: " + result.error;
+            return false;
+        }
+        if (result.status == 401 || result.status == 403)
+        {
+            if (renewed || !had_session || login_user_.empty())
+            {
+                *error = "登录已失效，请重新登录";
+                return false;
+            }
+            renewed = true;
+            std::string again;
+            if (!sign_in_with(base, login_user_, login_hash_, login_device_, &again))
+            {
+                *error = again.empty() ? "登录已失效，请重新登录" : again;
+                return false;
+            }
+            outgo = auth_headers();
+            continue;
+        }
+        return read_reply(result, data, error);
+    }
 }
 
 bool Api::playlists(int page, PlaylistPage *out, std::string *error)

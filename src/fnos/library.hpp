@@ -16,6 +16,7 @@
 #include "fnos/art.hpp"
 
 #include <cstddef>
+#include <chrono>
 #include <deque>
 #include <mutex>
 #include <pthread.h>
@@ -74,10 +75,14 @@ class Library
     void request_lyric(const std::string &guid);
     // Queues one cover for the worker; skipped when it is cached or asked for.
     void request_cover(const std::string &cover_id);
+    // Asks the worker to walk this track's redirects now, so the switch to it
+    // does not pay for them. Only worth calling for a song about to come up.
+    void request_prefetch(const std::string &guid);
     bool busy() const;
 
     // What playback needs: the address of a track and the headers it wants.
-    // Both take the lock, so they stay consistent with the session.
+    // Both take the lock, so they stay consistent with the session. A track
+    // whose redirects were prefetched answers with the resolved address.
     std::string stream_url(const std::string &guid) const;
     std::vector<std::string> media_headers() const;
 
@@ -183,6 +188,7 @@ class Library
         kFavoriteOff,
         kCover,
         kLyric,
+        kPrefetch,
     };
 
     struct Job
@@ -194,6 +200,9 @@ class Library
         std::string server;
         std::string username;
         std::string password; // already hashed by Api
+        // For a cover: the frame the screen last asked for it in. A request the
+        // screen has gone quiet about names a tile that left the window.
+        std::uint64_t stamp = 0;
     };
 
     struct Answer
@@ -219,6 +228,9 @@ class Library
 
     static void *run(void *user);
     void work();
+    // Makes one place in a full answer ring, giving up a request the screen can
+    // ask again before one it cannot. Worker thread, guard_ held.
+    void drop_reaskable();
     // Moves one finished answer onto the shelves. Render thread.
     void apply(Answer &&answer);
     // The worker: one job, one answer. Every network call happens here.
@@ -236,12 +248,22 @@ class Library
     mutable std::mutex guard_;
     std::deque<Job> queue_;
     std::deque<Answer> answers_; // finished, waiting for poll()
+    // Beats once per frame, from poll(): the clock cover requests are stamped
+    // against, so the worker can tell a wanted picture from an abandoned one.
+    std::uint64_t cover_clock_ = 0;
     bool stop_ = false;
     bool working_ = false;
     // The session, the one truth both threads read under guard_. A login leaves
     // a token, and the token is what unlocks the library on the next boot.
     std::string base_;
     std::string token_;
+    // The address a prefetch walked to, for the one track the queue is about to
+    // reach. A redirect target is a signed address of the NAS's own, so a stale
+    // answer would fail the stream where no answer only costs the hop again:
+    // hence the expiry, and hence the entry spending when it is read.
+    mutable std::string prefetch_guid_;
+    mutable std::string prefetch_url_;
+    mutable std::chrono::steady_clock::time_point prefetch_at_{};
     pthread_t worker_{};
     bool running_ = false;
 

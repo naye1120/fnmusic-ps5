@@ -18,8 +18,11 @@
 
 #include "app/shell.hpp"
 #include "app/tour.hpp"
+#include "audio/mixer.hpp"
 #include "core/save_file.hpp"
+#include "core/version.hpp"
 #include "demo/catalog.hpp"
+#include "fnos/service.hpp"
 #include "gfx/gl_program.hpp"
 #include "gfx/renderer.hpp"
 #include "manifest.hpp"
@@ -32,9 +35,11 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../third_party/stb/stb_image_write.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -259,9 +264,44 @@ int main(int argc, char **argv)
     hui::save::ensure_directory(data_root);
     std::remove((data_root + "/settings.bin").c_str());
     hui::app::Shell shell(fonts, catalog, data_root, renderer.glass_texture());
-    shell.set_version("host");
+    // The pictures are of the product, so they carry its own number: the same
+    // param.json the console reads, from the tree this host runs in.
+    const std::string packaged = hui::read_content_version("sce_sys/param.json");
+    shell.set_version(packaged.empty() ? "host" : packaged);
+
+    // The music player photographs nothing worth comparing while it is asking
+    // for a server: every shelf is a login form. The preview host in
+    // src/fnos/http.cpp answers a sign-in with a demo library, so the shelves,
+    // the grid and the play page have rows to lay out. No audio device is
+    // opened - the mixer only has to exist for the player to attach to.
+    hui::audio::Mixer mixer;
+    hui::fnos::Service &music = hui::fnos::Service::instance();
+    music.start(mixer, data_root);
 
     constexpr float kDt = 1.0f / 60.0f;
+    // The console's frame loop ticks the music service between its own updates;
+    // this host has a loop of its own, so the answers, the covers and the end of
+    // a track have to be said here as well - and in the console's order, before
+    // the page is asked to draw. Told afterwards, a finished answer is one frame
+    // invisible to the page, and a shelf reads as an empty one.
+    const auto tick = [&](const hui::InputFrame &input)
+    {
+        music.update(renderer);
+        shell.update(input, kDt);
+    };
+    music.library().sign_in("http://preview.local", "admin", "hunter2");
+    // The worker runs on the wall clock while the tour runs on a simulated one,
+    // so the sign-in is given the time to come back before any frame is
+    // photographed. `busy()` only covers the queue, and an answer that has
+    // finished but not landed yet is exactly the state worth waiting out.
+    for (int pass = 0; pass < 300 && !music.library().signed_in(); ++pass)
+    {
+        hui::InputFrame idle;
+        idle.connected = true;
+        tick(idle);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
     // HUI_MANIFEST=<file.json>: describe every design and theme (host/manifest.cpp).
     if (const char *manifest = std::getenv("HUI_MANIFEST"))
         return hui::host::write_manifest(manifest, shell) ? 0 : 1;
@@ -296,11 +336,11 @@ int main(int argc, char **argv)
         idle.connected = true;
         shell.show(static_cast<std::size_t>(from), false);
         for (int frame = 0; frame < 120; ++frame)
-            shell.update(idle, kDt);
+            tick(idle);
         shell.show(static_cast<std::size_t>(to), true);
         for (int frame = 0; frame < 36; ++frame)
         {
-            shell.update(idle, kDt);
+            tick(idle);
             char name[32];
             std::snprintf(name, sizeof(name), "strip-%02d", frame);
             render(name);
@@ -338,7 +378,7 @@ int main(int argc, char **argv)
                     hui::InputFrame input = idle;
                     if (frame == 0 && i > 0)
                         input.pressed = hui::action_bit(hui::Action::page_next);
-                    shell.update(input, kDt);
+                    tick(input);
                     if (count % kEvery == 0)
                         record();
                 }
@@ -359,7 +399,7 @@ int main(int argc, char **argv)
                 recorder.close(name);
                 design = shell.current();
             }
-            shell.update(input, kDt);
+            tick(input);
             if (count % kEvery == 0)
                 record();
             ++count;
@@ -381,6 +421,8 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "no design named '%s'\n", only.c_str());
         return 2;
     }
+    hui::InputFrame idle_frame;
+    idle_frame.connected = true;
     long frames = 0;
     while (!tour.finished() && frames < 60 * 60 * 60)
     {
@@ -395,8 +437,49 @@ int main(int argc, char **argv)
         telemetry.voices = static_cast<int>(frames / 40 % 4);
         telemetry.draw_calls = renderer.last_draw_calls();
         telemetry.instances = renderer.last_instances();
-        shell.update(input, kDt);
+        // The library answers on the wall clock while the tour counts simulated
+        // seconds. A frame is not fed to the page while one of its reads is
+        // still open, so a press lands on a page that already has its rows, and
+        // one script lays out one page every run.
+        for (int pass = 0; pass < 300 && music.library().busy(); ++pass)
+        {
+            tick(idle_frame);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        tick(input);
         ++frames;
+        // A press starts an entrance animation and usually asks for a fresh
+        // read, and both run on clocks the tour does not count. So the frame
+        // after a press is followed by a run of idle frames that begins only
+        // once the read the press caused has actually shown up on the queue,
+        // and ends once the page has then sat with nothing pending for two
+        // whole seconds. Every picture is therefore taken past the end of the
+        // animation, from the same point of it every run, rather than from
+        // wherever the wall clock happened to be when the rows arrived.
+        if (input.pressed != 0)
+        {
+            bool asked = false;
+            for (int pass = 0, quiet = 0; pass < 1800 && quiet < 120; ++pass)
+            {
+                if (music.library().busy())
+                {
+                    asked = true;
+                    quiet = 0;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                else if (!asked && pass < 60)
+                {
+                    // A job is only on the queue a poll after the press lands,
+                    // so the first second of waiting is grace, not quiet.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                else
+                {
+                    ++quiet;
+                }
+                tick(idle_frame);
+            }
+        }
         if (!tour.capture().empty())
         {
             render(tour.capture());

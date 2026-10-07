@@ -197,5 +197,5 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --generate-notes \
-              --title "ps5-homebrew-ui $VERSION"
+              --title "飞牛音乐 $VERSION"
           fi

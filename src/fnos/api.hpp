@@ -17,6 +17,8 @@
 namespace hui::fnos
 {
 
+class Json;
+
 struct Artist
 {
     std::string guid;
@@ -133,9 +135,23 @@ class Api
     std::vector<std::string> auth_headers() const;
     // One page of /track/list at a chosen size; `tracks` and `all_tracks` wrap it.
     bool tracks_page(int page, int size, TrackPage *out, std::string *error);
+    // Every endpoint goes through this: it asks once, and recovers twice at
+    // most - a transfer that died, and a session the NAS has forgotten.
+    bool ask(const std::string &base, const std::vector<std::string> &headers,
+             const std::string &path, const std::string &body_json, Json *data,
+             std::string *error);
+    // `password_hash` is already sha256 hex, which is what the endpoint wants.
+    bool sign_in_with(const std::string &base, const std::string &username,
+                      const std::string &password_hash, const std::string &device_id,
+                      std::string *error);
 
     std::string base_;
     std::string token_;
+    // What the last successful login used, in the shape a re-login needs: the
+    // password stays hashed, so an expired token costs no keyboard again.
+    std::string login_user_;
+    std::string login_hash_;
+    std::string login_device_;
 };
 
 } // namespace hui::fnos

@@ -547,7 +547,7 @@ std::string demo_answer(const std::string &url)
     if (holds(url, "/lyric/list"))
         return R"({"code":0,"msg":"","data":{"preferred":"demo-lyric-1","list":[{"guid":"demo-lyric-1",)"
                R"("isLRC":true,"offset":0,"content":"[00:00.00]预览用歌词\n[00:08.00]月出皎兮\n)"
-               R"([00:16.00]佼人僚兮\n]}}})";
+               R"([00:16.00]佼人僚兮\n"}]}})";
     if (holds(url, "/track/playlist-detail/list") || holds(url, "/track/list") ||
         holds(url, "/track/album-detail/list") || holds(url, "/track/artist-detail/list") ||
         holds(url, "/track/genre-detail/list"))
@@ -595,10 +595,22 @@ std::string http_escape(const std::string &value)
     return value;
 }
 
-HttpResult http_request(const std::string &, const std::string &url, std::vector<std::string>,
-                        const std::string &, std::size_t, int)
+HttpResult http_request(const std::string &, const std::string &url,
+                        std::vector<std::string> headers, const std::string &, std::size_t, int)
 {
     HttpResult result;
+    // Preview seam: one token value is refused so the re-login a real NAS does
+    // on an expired session has something to answer here. Nothing on a console
+    // ever sees this branch.
+    for (const std::string &line : headers)
+    {
+        if (line.find("music-token=preview-stale") != std::string::npos)
+        {
+            result.status = 401;
+            result.body = R"({"code":401,"msg":"token invalid","data":{}})";
+            return result;
+        }
+    }
     if (holds(url, "/static/cover"))
     {
         // No artwork is served to the preview: the UI draws its placeholder.
@@ -613,6 +625,11 @@ HttpResult http_request(const std::string &, const std::string &url, std::vector
 
 std::string http_resolve_redirects(const std::string &url, std::vector<std::string>, int)
 {
+    // Preview seam: a marked stream address answers as if it had been redirected
+    // to another host, so the prefetch that caches a resolved address has an
+    // observable result here. Nothing on a console ever sees this branch.
+    if (url.find("preview-redirect") != std::string::npos)
+        return "http://preview.resolved/stream";
     return url;
 }
 
